@@ -1,7 +1,8 @@
 {-# LANGUAGE DataKinds, DeriveFunctor, DerivingStrategies, ExplicitNamespaces,
              GADTs, GeneralizedNewtypeDeriving, KindSignatures, LambdaCase,
              OverloadedStrings, PartialTypeSignatures, ScopedTypeVariables,
-             TypeFamilies, TypeOperators, UnicodeSyntax, ViewPatterns #-}
+             TypeFamilies, TypeOperators, UnicodeSyntax,
+             ViewPatterns #-}
 
 module Options.Micro
   ( -- * Parser
@@ -10,9 +11,11 @@ module Options.Micro
   , runParser
     -- ** Option parser
   , OptParser
-  , opt
+  , positional
+  , named
   , switch
-  , req
+  , opt
+  , oneof
     -- ** Argument parser
     -- ** Command parser
   , CmdParser
@@ -21,6 +24,8 @@ module Options.Micro
   , noCommands
     -- ** Value parser
   , ValParser(..)
+  , string
+  , text
   , rational
   , decimal
     -- * Types
@@ -29,6 +34,7 @@ module Options.Micro
   , Help(..)
   , Metavar(..)
   , Name(..)
+  , ShowDefault(..)
     -- * Notes
     -- $note
   ) where
@@ -36,6 +42,7 @@ module Options.Micro
 import           Control.Applicative
 import           Control.Monad
 import           Data.Bifunctor      (first)
+import           Data.Coerce         (coerce)
 import           Data.Foldable       (asum)
 import           Data.List           (foldl')
 import           Data.Text           (Text)
@@ -98,74 +105,46 @@ runParser (Description description) (Parser parser) =
 --
 -- * Use 'opt' to parse a single option.
 -- * Use ('<*>') to parse two (or more) different options.
--- * Use ('<|>') to parse one option in one of two (or more) different ways.
---
--- Note that ('<|>') has somewhat unintuitive semantics; please see
--- @Note [Option parser alternative]@ at the bottom of this module for more
--- information.
 newtype OptParser a
   = OptParser (O.Parser a)
   deriving newtype (Applicative, Functor)
 
--- * No name:      Read Text,       Metavar, Help,
--- * Name, val:    Read Text, Name, Metavar, Help, Default
--- * Name, no val:            Name,          Help
+data Named = Named | Unnamed
 
-data Opt (named :: Bool) a where
-  Unnamed
+data Optional = Optional | Required
+
+data Option (named :: Named) (optional :: Optional) a where
+  OptPositional
     :: (Text -> Either Text a)
     -> Metavar
     -> Help
-    -> Opt 'False a
+    -> Option 'Unnamed 'Required a
 
-  Named
+  OptNamed
     :: (Text -> Either Text a)
     -> Name
     -> Metavar
     -> Help
-    -> Default a
-    -> Opt 'True a
+    -> Default optional a
+    -> ShowDefault optional a
+    -> Option 'Named optional a
 
-  Switch
-    :: Name
+  OptSwitch
+    :: a
+    -> Name
     -> Help
-    -> Opt 'True Bool
+    -> Default optional a
+    -> Option 'Named optional a
 
-  Fmap
-    :: (a -> b)
-    -> Opt named a
-    -> Opt named b
-
-instance Functor (Opt named) where
-  fmap = Fmap
-
-xarg
+positional
   :: (Text -> Either Text a)
   -> Metavar
   -> Help
-  -> Opt 'False a
-xarg =
-  Unnamed
+  -> Option 'Unnamed 'Required a
+positional =
+  OptPositional
 
-xopt
-  :: (Text -> Either Text a)
-  -> Name
-  -> Metavar
-  -> Help
-  -> Default a
-  -> Opt 'True a
-xopt =
-  Named
-
-xswitch
-  :: Name
-  -> Help
-  -> Opt 'True Bool
-xswitch =
-  Switch
-
-
--- | Construct an option parser.
+-- | Construct an named option.
 --
 -- === __Examples__
 --
@@ -193,81 +172,98 @@ xswitch =
 --         ('Default' False)
 --         ('Succeed' True)
 --     @
-opt
+named
+  :: (Text -> Either Text a)
+  -> Name
+  -> Metavar
+  -> Help
+  -> Default optional a
+  -> ShowDefault optional a
+  -> Option 'Named optional a
+named =
+  OptNamed
+
+-- | Construct a switch.
+switch
+  :: a
+  -> Name
+  -> Help
+  -> Default optional a
+  -> Option 'Named optional a
+switch =
+  OptSwitch
+
+-- | Construct an option parser from a single option.
+opt :: Option named optional a -> OptParser a
+opt =
+  coerce opt_
+
+opt_ :: Option named optional a -> O.Parser a
+opt_ = \case
+  OptPositional a b c ->
+    optPositional a b c
+
+  OptNamed a b c d e f ->
+    optNamed a b c d e f
+
+  OptSwitch a b c d ->
+    optSwitch a b c d
+
+optNamed
   :: (Text -> Either Text a) -- ^ Parse function to run, if present
   -> Name                    -- ^ Option name (short, long, or both)
   -> Metavar                 -- ^ Metavariable, shown in @--help@ output
   -> Help                    -- ^ Help text, shown in @--help@ output
-  -> Default a               -- ^ Default value, if missing
-  -> OptParser a
-opt (makeReadM -> read) name metavar help (Default def sho) = OptParser $
-  O.option read
+  -> Default optional a      -- ^ Default value, if missing
+  -> ShowDefault optional a
+  -> O.Parser a
+optNamed (makeReadM -> read) name metavar help def showDef =
+  case def of
+    NoDefault ->
+      O.option read
+        (mconcat
+          [ nameMod name
+          , helpMod help
+          , metavarMod metavar
+          ])
+
+    Default def' ->
+      case showDef of
+        ShowDefault showDef' ->
+          O.option read
+            (mconcat
+              [ nameMod name
+              , helpMod help
+              , metavarMod metavar
+              , O.value def'
+              , O.showDefaultWith showDef'
+              ])
+          <|>
+          pure def'
+
+optSwitch
+  :: a -- ^
+  -> Name -- ^
+  -> Help -- ^
+  -> Default optional a -- ^
+  -> O.Parser a
+optSwitch val name help def =
+  O.flag' val
     (mconcat
       [ nameMod name
       , helpMod help
-      , metavarMod metavar
-      , O.value def
-      , O.showDefaultWith sho
       ])
   <|>
-  pure def
+  case def of
+    NoDefault    -> empty
+    Default def' -> pure def'
 
-opt2
-  :: Opt named a
+oneof
+  :: [Option 'Named 'Required a]
   -> OptParser a
-opt2 = \case
-  Unnamed a b c ->
-    arg a b c
+oneof =
+  OptParser . asum . map opt_
 
-  Named a b c d e ->
-    opt a b c d e
-
-  Switch a b ->
-    switch a b
-
-  Fmap f x ->
-    opt2 (f <$> x)
-
-switch
-  :: Name -- ^
-  -> Help -- ^
-  -> OptParser Bool
-switch name help = OptParser $
-  O.switch
-    (mconcat
-      [ nameMod name
-      , helpMod help
-      ])
-
-req
-  :: [(Name, Help, ValParser a)]
-  -> OptParser a
-req =
-  OptParser . asum . map (uncurry3 req1)
-
-
-req1
-  :: Name -- ^
-  -> Help -- ^
-  -> ValParser a -- ^
-  -> O.Parser a
-req1 name help = \case
-  Succeed val ->
-    (O.flag' val . mconcat)
-      [ nameMod name
-      , helpMod help
-      ]
-
-  Attempt metavar (makeReadM -> read) ->
-    (O.option read . mconcat)
-      [ nameMod name
-      , helpMod help
-      , metavarMod metavar
-      ]
-
-uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
-uncurry3 f (x, y, z) =
-  f x y z
 
 -- | Parse a positional argument.
 --
@@ -283,12 +279,12 @@ uncurry3 f (x, y, z) =
 --     ('Help' \"An int.\")
 --     'decimal'
 -- @
-arg
+optPositional
   :: (Text -> Either Text a) -- ^ Parse function to run
   -> Metavar -- ^ Metavariable name, shown in @--help@ output
   -> Help -- ^ Help text, shown in @--help@ output
-  -> OptParser a
-arg (makeReadM -> read) metavar help = OptParser $
+  -> O.Parser a
+optPositional (makeReadM -> read) metavar help =
   O.argument read
     (mconcat
       [ helpMod help
@@ -362,6 +358,14 @@ data ValParser a
   | Attempt Metavar (Text -> Either Text a)
   deriving stock (Functor)
 
+string :: Text -> Either Text String
+string =
+  Right . Text.unpack
+
+text :: Text -> Either Text Text
+text =
+  Right
+
 -- | Parse a decimal.
 decimal :: Integral a => Text -> Either Text a
 decimal s =
@@ -396,8 +400,21 @@ rational s =
 -- * Succeed with @1@ if @--threads@ is missing
 -- * Succeed with @4@ if @--threads 4@ is provided
 -- * Fail if @--threads foo@ is provided
-data Default a
-  = Default a (a -> String)
+data Default (optional :: Optional) a where
+  NoDefault
+    :: Default 'Required a
+
+  Default
+    :: a
+    -> Default 'Optional a
+
+data ShowDefault (optional :: Optional) a where
+  NoShowDefault
+    :: ShowDefault 'Required a
+
+  ShowDefault
+    :: (a -> String)
+    -> ShowDefault 'Optional a
 
 -- | Program description, shown in @--help@ output.
 data Description
