@@ -1,0 +1,14 @@
+name: microcli
+version: 0.1.0
+cabal-version: 2.0
+build-type: Simple
+
+library
+  build-depends:
+      base
+    , optparse-applicative ^>= 0.14.2
+    , text ^>= 1.2.3
+  exposed-modules:
+    Options.Micro
+  ghc-options:
+    -Wall
