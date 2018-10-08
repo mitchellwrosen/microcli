@@ -6,15 +6,16 @@ module Options.Micro
     makeParser
   , runParser
     -- ** Option parser
-  , one
-  , oneof
+  , option
     -- *** Options
   , positional
   , named
   , flag
+  , repeated
+  , alternatives
   , ifMissing
     -- *** Readers
-  , string
+  , chars
   , text
   , rational
   , decimal
@@ -114,16 +115,16 @@ newtype OptionParser a
   deriving newtype (Applicative, Functor)
 
 -- | Construct an option parser from a single option.
-one
+option
   :: Option named optional a -- ^
   -> OptionParser a
-one =
-  coerce one_
+option =
+  coerce option_
 
-one_
+option_
   :: Option named optional a -- ^
   -> O.Parser a
-one_ = \case
+option_ = \case
   OptPositional a b c ->
     optPositional a b c
 
@@ -133,11 +134,20 @@ one_ = \case
   OptFlag a b c ->
     optFlag a b c
 
+  OptRepeated a ->
+    many (option_ a)
+
+  OptAsum a ->
+    asum (map option_ a)
+
   OptIfMissing (OptNamed a b c d) def ->
     optNamed a b c d (O.value def <> O.showDefault) <|> pure def
 
   OptIfMissing (OptFlag a b c) def ->
     optFlag a b c <|> pure def
+
+  OptIfMissing (OptAsum a) def ->
+    asum (map option_ a) <|> pure def
 
 optPositional :: (Text -> Either Text a) -> Metavar -> Help -> O.Parser a
 optPositional (makeReadM -> read) metavar help =
@@ -166,18 +176,12 @@ optFlag val name help =
       , helpMod help
       ])
 
--- | Construct an option parser from one or more alternative options.
-oneof
-  :: [Option 'Named 'Required a] -- ^
-  -> OptionParser a
-oneof =
-  OptionParser . asum . map one_
-
 
 -- | A command-line option, tagged with whether it is named, and whether it is
 -- optional.
 --
 -- * Use 'positional', 'named', or 'flag' to construct a single option.
+-- * Use 'repeated' to parse a named option zero or more times.
 -- * Use 'ifMissing' to provide a default value.
 data Option (named :: Named) (optional :: Optional) a where
   OptPositional
@@ -192,13 +196,21 @@ data Option (named :: Named) (optional :: Optional) a where
     -> Name
     -> Metavar
     -> Help
-    -> Option 'Named optional a
+    -> Option 'Named 'Required a
 
   OptFlag
     :: a
     -> Name
     -> Help
-    -> Option 'Named optional a
+    -> Option 'Named 'Required a
+
+  OptRepeated
+    :: Option named 'Required a
+    -> Option named 'Optional [a]
+
+  OptAsum
+    :: [Option 'Named 'Required a]
+    -> Option 'Named 'Required a
 
   OptIfMissing
     :: Option 'Named 'Required a
@@ -260,7 +272,7 @@ named
   -> Name -- ^ Option name (short, long, or both)
   -> Metavar -- ^ Metavariable, shown in @--help@ output
   -> Help -- ^ Help text, shown in @--help@ output
-  -> Option 'Named optional a
+  -> Option 'Named 'Required a
 named =
   OptNamed
 
@@ -284,9 +296,23 @@ flag
   :: a -- ^ Flag value, if present
   -> Name -- ^ Option name (short, long, or both)
   -> Help -- ^ Help text, shown in @--help@ output
-  -> Option 'Named optional a
+  -> Option 'Named 'Required a
 flag =
   OptFlag
+
+-- | Repeat an option zero or more times.
+repeated
+  :: Option named 'Required a -- ^
+  -> Option named 'Optional [a]
+repeated =
+  OptRepeated
+
+-- | Construct an option from one or more alternatives.
+alternatives
+  :: [Option 'Named 'Required a] -- ^
+  -> Option 'Named 'Required a
+alternatives =
+  OptAsum
 
 -- | Provide a default for a named option, if it's missing.
 ifMissing
@@ -301,9 +327,9 @@ ifMissing =
 -- Readers
 --------------------------------------------------------------------------------
 
--- | Parse a 'String'.
-string :: Text -> Either Text String
-string =
+-- | Parse a list of 'Char'.
+chars :: Text -> Either Text [Char]
+chars =
   Right . Text.unpack
 
 -- | Parse a 'Text'.
